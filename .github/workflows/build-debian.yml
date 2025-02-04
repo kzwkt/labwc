@@ -11,7 +11,7 @@ jobs:
       - name: Setup
         run: |
             apt update
-            apt install  build-essential cmake  libxml2-dev 	liblzma-dev  libglib2.0-dev  libcairo2-dev 	libpango1.0-dev libpng-dev librsvg2-dev meson pkgconf  wayland-protocols 	libxkbcommon-dev 	libdrm-dev scdoc gettext  -y
+            apt install git  build-essential cmake  libxml2-dev 	liblzma-dev  libglib2.0-dev  libcairo2-dev 	libpango1.0-dev libpng-dev librsvg2-dev meson pkgconf  wayland-protocols 	libxkbcommon-dev 	libdrm-dev scdoc gettext  -y
             meson setup build/
             meson -Dxwayland=disabled build/
             meson compile -C build/
