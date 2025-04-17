@@ -202,8 +202,25 @@ fill_section(const char *content, struct wl_list *list, uint32_t *found_buttons)
 }
 
 static void
+clear_title_layout(void)
+{
+	struct title_button *button, *button_tmp;
+	wl_list_for_each_safe(button, button_tmp, &rc.title_buttons_left, link) {
+		wl_list_remove(&button->link);
+		zfree(button);
+	}
+	wl_list_for_each_safe(button, button_tmp, &rc.title_buttons_right, link) {
+		wl_list_remove(&button->link);
+		zfree(button);
+	}
+	rc.title_layout_loaded = false;
+}
+
+static void
 fill_title_layout(char *content)
 {
+	clear_title_layout();
+
 	struct wl_list *sections[] = {
 		&rc.title_buttons_left,
 		&rc.title_buttons_right,
@@ -338,6 +355,16 @@ fill_window_rule(char *nodename, char *content, struct parser_state *state)
 			"nodename: '%s' content: '%s'", nodename, content);
 	} else {
 		action_arg_from_xml_node(state->current_window_rule_action, nodename, content);
+	}
+}
+
+static void
+clear_window_switcher_fields(void)
+{
+	struct window_switcher_field *field, *field_tmp;
+	wl_list_for_each_safe(field, field_tmp, &rc.window_switcher.fields, link) {
+		wl_list_remove(&field->link);
+		osd_field_free(field);
 	}
 }
 
@@ -1025,7 +1052,24 @@ entry(xmlNode *node, char *nodename, char *content, struct parser_state *state)
 		return;
 	}
 
-	/* handle the rest */
+	if (!strcasecmp(nodename, "prefix.desktops")) {
+		xstrdup_replace(rc.workspace_config.prefix, content ? content : "");
+		return;
+	}
+
+	/*
+	 * Nodenames where we want to honour !content have to be parsed above
+	 * this point. An example of this is:
+	 *
+	 *     <desktops>
+	 *       <prefix></prefix>
+	 *     </desktops>
+	 *
+	 * In the case of the <prefix> element having content, the node will be
+	 * processed twice; first for the element itself (with no content) and
+	 * then the content itself. In this situation xstrdup_replace() is
+	 * called twice, but the end result is the right one.
+	 */
 	if (!content) {
 		return;
 	}
@@ -1209,8 +1253,6 @@ entry(xmlNode *node, char *nodename, char *content, struct parser_state *state)
 		rc.workspace_config.popuptime = atoi(content);
 	} else if (!strcasecmp(nodename, "number.desktops")) {
 		rc.workspace_config.min_nr_workspaces = MAX(1, atoi(content));
-	} else if (!strcasecmp(nodename, "prefix.desktops")) {
-		xstrdup_replace(rc.workspace_config.prefix, content);
 	} else if (!strcasecmp(nodename, "popupShow.resize")) {
 		if (!strcasecmp(content, "Always")) {
 			rc.resize_indicator = LAB_RESIZE_INDICATOR_ALWAYS;
@@ -1223,6 +1265,10 @@ entry(xmlNode *node, char *nodename, char *content, struct parser_state *state)
 		}
 	} else if (!strcasecmp(nodename, "drawContents.resize")) {
 		set_bool(content, &rc.resize_draw_contents);
+	} else if (!strcasecmp(nodename, "cornerRange.resize")) {
+		rc.resize_corner_range = atoi(content);
+	} else if (!strcasecmp(nodename, "minimumArea.resize")) {
+		rc.resize_minimum_area = MAX(0, atoi(content));
 	} else if (!strcasecmp(nodename, "mouseEmulation.tablet")) {
 		set_bool(content, &rc.tablet.force_mouse_emulation);
 	} else if (!strcasecmp(nodename, "mapToOutput.tablet")) {
@@ -1263,8 +1309,10 @@ entry(xmlNode *node, char *nodename, char *content, struct parser_state *state)
 		rc.mag_height = atoi(content);
 	} else if (!strcasecmp(nodename, "initScale.magnifier")) {
 		set_float(content, &rc.mag_scale);
+		rc.mag_scale = MAX(1.0, rc.mag_scale);
 	} else if (!strcasecmp(nodename, "increment.magnifier")) {
 		set_float(content, &rc.mag_increment);
+		rc.mag_increment = MAX(0, rc.mag_increment);
 	} else if (!strcasecmp(nodename, "useFilter.magnifier")) {
 		set_bool(content, &rc.mag_filter);
 	}
@@ -1343,6 +1391,7 @@ xml_tree_walk(xmlNode *node, struct parser_state *state)
 			continue;
 		}
 		if (!strcasecmp((char *)n->name, "fields")) {
+			clear_window_switcher_fields();
 			state->in_window_switcher_field = true;
 			traverse(n, state);
 			state->in_window_switcher_field = false;
@@ -1482,7 +1531,7 @@ rcxml_init(void)
 	rc.unsnap_threshold = 20;
 	rc.unmaximize_threshold = 150;
 
-	rc.snap_edge_range = 1;
+	rc.snap_edge_range = 10;
 	rc.snap_overlay_enabled = true;
 	rc.snap_overlay_delay_inner = 500;
 	rc.snap_overlay_delay_outer = 500;
@@ -1498,6 +1547,8 @@ rcxml_init(void)
 
 	rc.resize_indicator = LAB_RESIZE_INDICATOR_NEVER;
 	rc.resize_draw_contents = true;
+	rc.resize_corner_range = -1;
+	rc.resize_minimum_area = 8;
 
 	rc.workspace_config.popuptime = INT_MIN;
 	rc.workspace_config.min_nr_workspaces = 1;
@@ -1650,22 +1701,25 @@ deduplicate_key_bindings(void)
 	}
 }
 
-static struct {
-	enum window_switcher_field_content content;
-	int width;
-} fields[] = {
-	{ LAB_FIELD_TYPE, 25 },
-	{ LAB_FIELD_TRIMMED_IDENTIFIER, 25 },
-	{ LAB_FIELD_TITLE, 50 },
-	{ LAB_FIELD_NONE, 0 },
-};
-
 static void
 load_default_window_switcher_fields(void)
 {
-	struct window_switcher_field *field;
+	static const struct {
+		enum window_switcher_field_content content;
+		int width;
+	} fields[] = {
+#if HAVE_LIBSFDO
+		{ LAB_FIELD_ICON, 5 },
+		{ LAB_FIELD_DESKTOP_ENTRY_NAME, 30 },
+		{ LAB_FIELD_TITLE, 65 },
+#else
+		{ LAB_FIELD_DESKTOP_ENTRY_NAME, 30 },
+		{ LAB_FIELD_TITLE, 70 },
+#endif
+	};
 
-	for (int i = 0; fields[i].content != LAB_FIELD_NONE; i++) {
+	struct window_switcher_field *field;
+	for (size_t i = 0; i < ARRAY_SIZE(fields); i++) {
 		field = znew(*field);
 		field->content = fields[i].content;
 		field->width = fields[i].width;
@@ -1754,13 +1808,20 @@ post_processing(void)
 		if (!rc.workspace_config.prefix) {
 			rc.workspace_config.prefix = xstrdup(_("Workspace"));
 		}
+
+		struct buf b = BUF_INIT;
 		struct workspace *workspace;
 		for (int i = nr_workspaces; i < rc.workspace_config.min_nr_workspaces; i++) {
 			workspace = znew(*workspace);
-			workspace->name = strdup_printf("%s %d",
-				rc.workspace_config.prefix, i + 1);
+			if (!string_null_or_empty(rc.workspace_config.prefix)) {
+				buf_add_fmt(&b, "%s ", rc.workspace_config.prefix);
+			}
+			buf_add_fmt(&b, "%d", i + 1);
+			workspace->name = xstrdup(b.data);
 			wl_list_append(&rc.workspace_config.workspaces, &workspace->link);
+			buf_clear(&b);
 		}
+		buf_reset(&b);
 	}
 	if (rc.workspace_config.popuptime == INT_MIN) {
 		rc.workspace_config.popuptime = 1000;
@@ -1768,10 +1829,6 @@ post_processing(void)
 	if (!wl_list_length(&rc.window_switcher.fields)) {
 		wlr_log(WLR_INFO, "load default window switcher fields");
 		load_default_window_switcher_fields();
-	}
-
-	if (rc.mag_scale <= 0.0) {
-		rc.mag_scale = 1.0;
 	}
 }
 
@@ -1949,15 +2006,7 @@ rcxml_finish(void)
 	zfree(rc.workspace_config.prefix);
 	zfree(rc.tablet.output_name);
 
-	struct title_button *p, *p_tmp;
-	wl_list_for_each_safe(p, p_tmp, &rc.title_buttons_left, link) {
-		wl_list_remove(&p->link);
-		zfree(p);
-	}
-	wl_list_for_each_safe(p, p_tmp, &rc.title_buttons_right, link) {
-		wl_list_remove(&p->link);
-		zfree(p);
-	}
+	clear_title_layout();
 
 	struct usable_area_override *area, *area_tmp;
 	wl_list_for_each_safe(area, area_tmp, &rc.usable_area_overrides, link) {
@@ -2004,11 +2053,7 @@ rcxml_finish(void)
 
 	regions_destroy(NULL, &rc.regions);
 
-	struct window_switcher_field *field, *field_tmp;
-	wl_list_for_each_safe(field, field_tmp, &rc.window_switcher.fields, link) {
-		wl_list_remove(&field->link);
-		osd_field_free(field);
-	}
+	clear_window_switcher_fields();
 
 	struct window_rule *rule, *rule_tmp;
 	wl_list_for_each_safe(rule, rule_tmp, &rc.window_rules, link) {

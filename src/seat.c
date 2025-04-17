@@ -588,6 +588,8 @@ seat_finish(struct server *server)
 	struct seat *seat = &server->seat;
 	wl_list_remove(&seat->new_input.link);
 	wl_list_remove(&seat->focus_change.link);
+	wl_list_remove(&seat->virtual_pointer_new.link);
+	wl_list_remove(&seat->virtual_keyboard_new.link);
 
 	struct input *input, *next;
 	wl_list_for_each_safe(input, next, &seat->inputs, link) {
@@ -598,6 +600,7 @@ seat_finish(struct server *server)
 		wl_event_source_remove(seat->workspace_osd_timer);
 		seat->workspace_osd_timer = NULL;
 	}
+	overlay_finish(seat);
 
 	input_handlers_finish(seat);
 	input_method_relay_finish(seat->input_method_relay);

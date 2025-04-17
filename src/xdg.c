@@ -798,8 +798,6 @@ static const struct view_impl xdg_toplevel_view_impl = {
 	.unmap = xdg_toplevel_view_unmap,
 	.maximize = xdg_toplevel_view_maximize,
 	.minimize = xdg_toplevel_view_minimize,
-	.move_to_front = view_impl_move_to_front,
-	.move_to_back = view_impl_move_to_back,
 	.get_root = xdg_toplevel_view_get_root,
 	.append_children = xdg_toplevel_view_append_children,
 	.get_size_hints = xdg_toplevel_view_get_size_hints,
@@ -872,11 +870,6 @@ xdg_activation_handle_request(struct wl_listener *listener, void *data)
 
 	if (window_rules_get_property(view, "ignoreFocusRequest") == LAB_PROP_TRUE) {
 		wlr_log(WLR_INFO, "Ignoring focus request due to window rule configuration");
-		return;
-	}
-
-	if (view->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
-		wlr_log(WLR_INFO, "Preventing focus request while in window switcher");
 		return;
 	}
 
@@ -1017,3 +1010,10 @@ xdg_shell_init(struct server *server)
 		&server->xdg_activation_new_token);
 }
 
+void
+xdg_shell_finish(struct server *server)
+{
+	wl_list_remove(&server->new_xdg_toplevel.link);
+	wl_list_remove(&server->xdg_activation_request.link);
+	wl_list_remove(&server->xdg_activation_new_token.link);
+}

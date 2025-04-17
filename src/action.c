@@ -123,6 +123,7 @@ enum action_type {
 	ACTION_TYPE_ZOOM_IN,
 	ACTION_TYPE_ZOOM_OUT,
 	ACTION_TYPE_WARP_CURSOR,
+	ACTION_TYPE_HIDE_CURSOR,
 };
 
 const char *action_names[] = {
@@ -188,6 +189,7 @@ const char *action_names[] = {
 	"ZoomIn",
 	"ZoomOut",
 	"WarpCursor",
+	"HideCursor",
 	NULL
 };
 
@@ -606,6 +608,12 @@ action_is_valid(struct action *action)
 	return false;
 }
 
+bool
+action_is_show_menu(struct action *action)
+{
+	return action->type == ACTION_TYPE_SHOW_MENU;
+}
+
 void
 action_free(struct action *action)
 {
@@ -657,16 +665,6 @@ show_menu(struct server *server, struct view *view, struct cursor_context *ctx,
 	if (!menu) {
 		return;
 	}
-
-	/*
-	 * We always refresh client-list-combined-menu and client-send-to-menu
-	 * so that they are up-to-date whether they are directly opened as a
-	 * top-level menu or opened as a submenu which we don't know at this
-	 * point. It is also needed to calculate the proper width for placement
-	 * as it fluctuates depending on application/workspace titles.
-	 */
-	update_client_list_combined_menu(menu->server);
-	update_client_send_to_menu(menu->server);
 
 	int x = server->seat.cursor->x;
 	int y = server->seat.cursor->y;
@@ -871,6 +869,14 @@ actions_run(struct view *activator, struct server *server,
 	}
 
 	wl_list_for_each(action, actions, link) {
+		if (server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER
+				&& action->type != ACTION_TYPE_NEXT_WINDOW
+				&& action->type != ACTION_TYPE_PREVIOUS_WINDOW) {
+			wlr_log(WLR_INFO, "Only NextWindow or PreviousWindow "
+				"actions are accepted while window switching.");
+			continue;
+		}
+
 		wlr_log(WLR_DEBUG, "Handling action %u: %s", action->type,
 			action_names[action->type]);
 
@@ -1084,7 +1090,8 @@ actions_run(struct view *activator, struct server *server,
 			if (view) {
 				int x = action_get_int(action, "x", 0);
 				int y = action_get_int(action, "y", 0);
-				view_move(view, x, y);
+				struct border margin = ssd_thickness(view);
+				view_move(view, x + margin.left, y + margin.top);
 			}
 			break;
 		case ACTION_TYPE_RESIZETO:
@@ -1312,13 +1319,13 @@ actions_run(struct view *activator, struct server *server,
 			rc.tablet.force_mouse_emulation = !rc.tablet.force_mouse_emulation;
 			break;
 		case ACTION_TYPE_TOGGLE_MAGNIFY:
-			magnify_toggle(server);
+			magnifier_toggle(server);
 			break;
 		case ACTION_TYPE_ZOOM_IN:
-			magnify_set_scale(server, MAGNIFY_INCREASE);
+			magnifier_set_scale(server, MAGNIFY_INCREASE);
 			break;
 		case ACTION_TYPE_ZOOM_OUT:
-			magnify_set_scale(server, MAGNIFY_DECREASE);
+			magnifier_set_scale(server, MAGNIFY_DECREASE);
 			break;
 		case ACTION_TYPE_WARP_CURSOR:
 			{
@@ -1329,6 +1336,9 @@ actions_run(struct view *activator, struct server *server,
 
 				warp_cursor(view, output, to, x, y);
 			}
+			break;
+		case ACTION_TYPE_HIDE_CURSOR:
+			cursor_set_visible(&server->seat, false);
 			break;
 		case ACTION_TYPE_INVALID:
 			wlr_log(WLR_ERROR, "Not executing unknown action");

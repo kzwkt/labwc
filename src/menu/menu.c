@@ -49,9 +49,8 @@ static bool waiting_for_pipe_menu;
 static struct menuitem *selected_item;
 
 struct menu_pipe_context {
-	struct server *server;
-	struct menuitem *item;
-	struct menu *top_level_menu;
+	struct wlr_box anchor_rect;
+	struct menu *pipemenu;
 	struct buf buf;
 	struct wl_event_source *event_read;
 	struct wl_event_source *event_timeout;
@@ -88,8 +87,7 @@ menu_create(struct server *server, const char *id, const char *label)
 	menu->label = xstrdup(label ? label : id);
 	menu->parent = current_menu;
 	menu->server = server;
-	menu->is_pipemenu = waiting_for_pipe_menu;
-	menu->size.width = server->theme->menu_min_width;
+	menu->is_pipemenu_child = waiting_for_pipe_menu;
 	return menu;
 }
 
@@ -115,7 +113,12 @@ validate_menu(struct menu *menu)
 	struct action *action, *action_tmp;
 	wl_list_for_each(item, &menu->menuitems, link) {
 		wl_list_for_each_safe(action, action_tmp, &item->actions, link) {
-			if (!action_is_valid(action)) {
+			bool is_show_menu = action_is_show_menu(action);
+			if (!action_is_valid(action) || is_show_menu) {
+				if (is_show_menu) {
+					wlr_log(WLR_ERROR, "'ShowMenu' action is"
+						" not allowed in menu items");
+				}
 				wl_list_remove(&action->link);
 				action_free(action);
 				wlr_log(WLR_ERROR, "Removed invalid menu action");
@@ -182,10 +185,20 @@ item_create_scene_for_state(struct menuitem *item, float *text_color,
 	int label_max_width = bg_width - 2 * theme->menu_items_padding_x - arrow_width - icon_width;
 
 	/* Create icon */
-	if (item->icon_name) {
+	bool show_app_icon = !strcmp(item->parent->id, "client-list-combined-menu")
+				&& item->client_list_view;
+	if (item->icon_name || show_app_icon) {
 		struct scaled_icon_buffer *icon_buffer = scaled_icon_buffer_create(
 			tree, menu->server, icon_size, icon_size);
-		scaled_icon_buffer_set_icon_name(icon_buffer, item->icon_name);
+		if (item->icon_name) {
+			/* icon set via <menu icon="..."> */
+			scaled_icon_buffer_set_icon_name(icon_buffer, item->icon_name);
+		} else if (show_app_icon) {
+			/* app icon in client-list-combined-menu */
+			const char *app_id = view_get_string_prop(
+				item->client_list_view, "app_id");
+			scaled_icon_buffer_set_app_id(icon_buffer, app_id);
+		}
 		wlr_scene_node_set_position(&icon_buffer->scene_buffer->node,
 			theme->menu_items_padding_x, theme->menu_items_padding_y);
 	}
@@ -357,19 +370,30 @@ title_create_scene(struct menuitem *menuitem, int *item_y)
 	*item_y += theme->menu_header_height;
 }
 
-/* (Re)creates the scene of the menu */
+static void item_destroy(struct menuitem *item);
+
 static void
-menu_update_scene(struct menu *menu)
+reset_menu(struct menu *menu)
+{
+	struct menuitem *item, *next;
+	wl_list_for_each_safe(item, next, &menu->menuitems, link) {
+		item_destroy(item);
+	}
+	if (menu->scene_tree) {
+		wlr_scene_node_destroy(&menu->scene_tree->node);
+		menu->scene_tree = NULL;
+	}
+	/* TODO: also reset other fields? */
+}
+
+static void
+menu_create_scene(struct menu *menu)
 {
 	struct menuitem *item;
 	struct theme *theme = menu->server->theme;
 
-	if (menu->scene_tree) {
-		wlr_scene_node_destroy(&menu->scene_tree->node);
-		wl_list_for_each(item, &menu->menuitems, link) {
-			item->tree = NULL;
-		}
-	}
+	assert(!menu->scene_tree);
+
 	menu->scene_tree = wlr_scene_tree_create(menu->server->menu_tree);
 	wlr_scene_node_set_enabled(&menu->scene_tree->node, false);
 
@@ -413,22 +437,6 @@ menu_update_scene(struct menu *menu)
 		theme->menu_border_color);
 	assert(bg_buffer);
 	wlr_scene_node_lower_to_bottom(&bg_buffer->scene_buffer->node);
-}
-
-static void
-post_processing(struct server *server)
-{
-	/*
-	 * Create menu scene after all of its contents is determined
-	 * (e.g. when finished reading menu.xml or received output from
-	 * pipemenu program).
-	 */
-	struct menu *menu;
-	wl_list_for_each(menu, &server->menus, link) {
-		if (!menu->scene_tree) {
-			menu_update_scene(menu);
-		}
-	}
 }
 
 /*
@@ -481,16 +489,11 @@ fill_item(char *nodename, char *content)
 static void
 item_destroy(struct menuitem *item)
 {
-	if (item->pipe_ctx) {
-		item->pipe_ctx->item = NULL;
-	}
 	wl_list_remove(&item->link);
 	action_list_free(&item->actions);
 	if (item->tree) {
 		wlr_scene_node_destroy(&item->tree->node);
 	}
-	free(item->execute);
-	free(item->id);
 	free(item->text);
 	free(item->icon_name);
 	free(item);
@@ -636,32 +639,6 @@ static bool parse_buf(struct server *server, struct buf *buf);
 static int handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx);
 static int handle_pipemenu_timeout(void *_ctx);
 
-static void
-parse_root_pipemenu(struct menu *top_level_menu, const char *execute)
-{
-	int pipe_fd = 0;
-	pid_t pid = spawn_piped(execute, &pipe_fd);
-	if (pid <= 0) {
-		wlr_log(WLR_ERROR, "Failed to spawn pipe menu process %s", execute);
-		return;
-	}
-
-	struct menu_pipe_context *ctx = znew(*ctx);
-	ctx->server = top_level_menu->server;
-	ctx->top_level_menu = top_level_menu;
-	ctx->pid = pid;
-	ctx->pipe_fd = pipe_fd;
-	ctx->buf = BUF_INIT;
-	top_level_menu->pipe_ctx = ctx;
-
-	ctx->event_read = wl_event_loop_add_fd(ctx->server->wl_event_loop,
-		pipe_fd, WL_EVENT_READABLE, handle_pipemenu_readable, ctx);
-
-	ctx->event_timeout = wl_event_loop_add_timer(ctx->server->wl_event_loop,
-		handle_pipemenu_timeout, ctx);
-	wl_event_source_timer_update(ctx->event_timeout, PIPEMENU_TIMEOUT_IN_MS);
-}
-
 /*
  * <menu> elements have three different roles:
  *  * Definition of (sub)menu - has ID, LABEL and CONTENT
@@ -676,30 +653,35 @@ handle_menu_element(xmlNode *n, struct server *server)
 	char *execute = (char *)xmlGetProp(n, (const xmlChar *)"execute");
 	char *id = (char *)xmlGetProp(n, (const xmlChar *)"id");
 
-	if (execute && label && id) {
+	if (!id) {
+		wlr_log(WLR_ERROR, "<menu> without id is not allowed");
+		goto error;
+	}
+
+	if (execute && label) {
 		wlr_log(WLR_DEBUG, "pipemenu '%s:%s:%s'", id, label, execute);
+
+		struct menu *pipemenu = menu_create(server, id, label);
+		pipemenu->execute = xstrdup(execute);
 		if (!current_menu) {
 			/*
-			 * Handle pipemenu as the root-menu such this:
+			 * A pipemenu may not have its parent like:
 			 *
 			 * <?xml version="1.0" encoding="UTF-8"?>
 			 * <openbox_menu>
 			 *   <menu id="root-menu" label="foo" execute="bar"/>
 			 * </openbox_menu>
 			 */
-			struct menu *menu = menu_create(server, id, label);
-			parse_root_pipemenu(menu, execute);
 		} else {
 			current_item = item_create(current_menu, label,
 				/* arrow */ true);
 			fill_item("icon", icon_name);
 			current_item_action = NULL;
-			current_item->execute = xstrdup(execute);
-			current_item->id = xstrdup(id);
+			current_item->submenu = pipemenu;
 		}
-	} else if ((label && id) || is_toplevel_static_menu_definition(n, id)) {
+	} else if (label || is_toplevel_static_menu_definition(n, id)) {
 		/*
-		 * (label && id) refers to <menu id="" label=""> which is an
+		 * label != NULL refers to <menu id="" label=""> which is an
 		 * inline menu definition.
 		 *
 		 * is_toplevel_static_menu_definition() catches:
@@ -714,32 +696,25 @@ handle_menu_element(xmlNode *n, struct server *server)
 		 * attribute to make it easier for users to define "root-menu"
 		 * and "client-menu".
 		 */
-		struct menu **submenu = NULL;
+		struct menu *parent_menu = current_menu;
+		current_menu = menu_create(server, id, label);
+		if (icon_name) {
+			current_menu->icon_name = xstrdup(icon_name);
+		}
 		if (menu_level > 0) {
 			/*
 			 * In a nested (inline) menu definition we need to
 			 * create an item pointing to the new submenu
 			 */
-			current_item = item_create(current_menu, label, true);
-			if (current_item) {
-				fill_item("icon", icon_name);
-				submenu = &current_item->submenu;
-			} else {
-				submenu = NULL;
-			}
+			current_item = item_create(parent_menu, label, true);
+			fill_item("icon", icon_name);
+			current_item->submenu = current_menu;
 		}
 		++menu_level;
-		current_menu = menu_create(server, id, label);
-		if (icon_name) {
-			current_menu->icon_name = xstrdup(icon_name);
-		}
-		if (submenu) {
-			*submenu = current_menu;
-		}
 		traverse(n, server);
 		current_menu = current_menu->parent;
 		--menu_level;
-	} else if (id) {
+	} else {
 		/*
 		 * <menu id=""> (when inside another <menu> element) creates an
 		 * entry which points to a menu defined elsewhere.
@@ -749,13 +724,17 @@ handle_menu_element(xmlNode *n, struct server *server)
 		 * pipemenu opening the "root-menu" or similar.
 		 */
 
-		if (current_menu && current_menu->is_pipemenu) {
+		if (waiting_for_pipe_menu) {
 			wlr_log(WLR_ERROR,
 				"cannot link to static menu from pipemenu");
 			goto error;
 		}
 
 		struct menu *menu = menu_get_by_id(server, id);
+		if (!menu) {
+			wlr_log(WLR_ERROR, "no menu with id '%s'", id);
+			goto error;
+		}
 
 		struct menu *iter = current_menu;
 		while (iter) {
@@ -767,15 +746,9 @@ handle_menu_element(xmlNode *n, struct server *server)
 			iter = iter->parent;
 		}
 
-		if (menu) {
-			current_item = item_create(current_menu, menu->label, true);
-			if (current_item) {
-				fill_item("icon", menu->icon_name);
-				current_item->submenu = menu;
-			}
-		} else {
-			wlr_log(WLR_ERROR, "no menu with id '%s'", id);
-		}
+		current_item = item_create(current_menu, menu->label, true);
+		fill_item("icon", menu->icon_name);
+		current_item->submenu = menu;
 	}
 error:
 	free(label);
@@ -909,10 +882,8 @@ get_item_anchor_rect(struct theme *theme, struct menuitem *item)
 }
 
 static void
-menu_configure(struct menu *menu, struct wlr_box anchor_rect)
+menu_reposition(struct menu *menu, struct wlr_box anchor_rect)
 {
-	struct theme *theme = menu->server->theme;
-
 	/* Get output usable area to place the menu within */
 	struct output *output = output_nearest_to(menu->server,
 		anchor_rect.x, anchor_rect.y);
@@ -957,15 +928,6 @@ menu_configure(struct menu *menu, struct wlr_box anchor_rect)
 	wlr_scene_node_set_position(&menu->scene_tree->node, box.x, box.y);
 
 	menu->align_left = (box.x < anchor_rect.x);
-
-	struct menuitem *item;
-	wl_list_for_each(item, &menu->menuitems, link) {
-		if (!item->submenu) {
-			continue;
-		}
-		anchor_rect = get_item_anchor_rect(theme, item);
-		menu_configure(item->submenu, anchor_rect);
-	}
 }
 
 static void
@@ -1001,20 +963,13 @@ init_client_send_to_menu(struct server *server)
  * with the workspace names that can be used with
  * SendToDesktop, left/right options are included.
  */
-void
+static void
 update_client_send_to_menu(struct server *server)
 {
-	struct menu *menu = menu_get_by_id(server,
-			"client-send-to-menu");
+	struct menu *menu = menu_get_by_id(server, "client-send-to-menu");
+	assert(menu);
 
-	if (menu) {
-		struct menuitem *item, *next;
-		wl_list_for_each_safe(item, next, &menu->menuitems, link) {
-			item_destroy(item);
-		}
-	}
-
-	menu->size.height = 0;
+	reset_menu(menu);
 
 	struct workspace *workspace;
 
@@ -1031,7 +986,7 @@ update_client_send_to_menu(struct server *server)
 		fill_item("to.action", workspace->name);
 	}
 
-	menu_update_scene(menu);
+	menu_create_scene(menu);
 }
 
 static void
@@ -1049,23 +1004,13 @@ init_client_list_combined_menu(struct server *server)
  * separator label and the titles of the view, if any, below each workspace
  * name. Active view is indicated by "*" preceding title.
  */
-void
+static void
 update_client_list_combined_menu(struct server *server)
 {
 	struct menu *menu = menu_get_by_id(server, "client-list-combined-menu");
+	assert(menu);
 
-	if (!menu) {
-		/* Menu is created on compositor startup/reconfigure */
-		wlr_log(WLR_ERROR, "client-list-combined-menu does not exist");
-		return;
-	}
-
-	struct menuitem *item, *next;
-	wl_list_for_each_safe(item, next, &menu->menuitems, link) {
-		item_destroy(item);
-	}
-
-	menu->size.height = 0;
+	reset_menu(menu);
 
 	struct workspace *workspace;
 	struct view *view;
@@ -1090,20 +1035,19 @@ update_client_list_combined_menu(struct server *server)
 				buf_add(&buffer, title);
 
 				current_item = item_create(menu, buffer.data, /*show arrow*/ false);
-				current_item->id = xstrdup(menu->id);
 				current_item->client_list_view = view;
 				fill_item("name.action", "Focus");
 				fill_item("name.action", "Raise");
 				buf_clear(&buffer);
+				menu->has_icons = true;
 			}
 		}
 		current_item = item_create(menu, _("Go there..."), /*show arrow*/ false);
-		current_item->id = xstrdup(menu->id);
 		fill_item("name.action", "GoToDesktop");
 		fill_item("to.action", workspace->name);
 	}
 	buf_reset(&buffer);
-	menu_update_scene(menu);
+	menu_create_scene(menu);
 }
 
 static void
@@ -1115,8 +1059,6 @@ init_rootmenu(struct server *server)
 	if (!menu) {
 		current_menu = NULL;
 		menu = menu_create(server, "root-menu", "");
-	}
-	if (wl_list_empty(&menu->menuitems)) {
 		current_item = item_create(menu, _("Reconfigure"), false);
 		fill_item("name.action", "Reconfigure");
 		current_item = item_create(menu, _("Exit"), false);
@@ -1133,8 +1075,6 @@ init_windowmenu(struct server *server)
 	if (!menu) {
 		current_menu = NULL;
 		menu = menu_create(server, "client-menu", "");
-	}
-	if (wl_list_empty(&menu->menuitems)) {
 		current_item = item_create(menu, _("Minimize"), false);
 		fill_item("name.action", "Iconify");
 		current_item = item_create(menu, _("Maximize"), false);
@@ -1186,7 +1126,6 @@ menu_init(struct server *server)
 	init_windowmenu(server);
 	init_client_list_combined_menu(server);
 	init_client_send_to_menu(server);
-	post_processing(server);
 	validate(server);
 }
 
@@ -1213,6 +1152,8 @@ nullify_item_pointing_to_this_menu(struct menu *menu)
 	}
 }
 
+static void pipemenu_ctx_destroy(struct menu_pipe_context *ctx);
+
 static void
 menu_free(struct menu *menu)
 {
@@ -1229,7 +1170,8 @@ menu_free(struct menu *menu)
 	}
 
 	if (menu->pipe_ctx) {
-		menu->pipe_ctx->top_level_menu = NULL;
+		pipemenu_ctx_destroy(menu->pipe_ctx);
+		assert(!menu->pipe_ctx);
 	}
 
 	/*
@@ -1243,34 +1185,17 @@ menu_free(struct menu *menu)
 	zfree(menu->id);
 	zfree(menu->label);
 	zfree(menu->icon_name);
+	zfree(menu->execute);
 	zfree(menu);
-}
-
-/**
- * menu_free_from - free menu list starting from current point
- * @from: point to free from (if NULL, all menus are freed)
- */
-static void
-menu_free_from(struct server *server, struct menu *from)
-{
-	bool destroying = !from;
-	struct menu *menu, *tmp_menu;
-	wl_list_for_each_safe(menu, tmp_menu, &server->menus, link) {
-		if (menu == from) {
-			destroying = true;
-		}
-		if (!destroying) {
-			continue;
-		}
-
-		menu_free(menu);
-	}
 }
 
 void
 menu_finish(struct server *server)
 {
-	menu_free_from(server, NULL);
+	struct menu *menu, *tmp_menu;
+	wl_list_for_each_safe(menu, tmp_menu, &server->menus, link) {
+		menu_free(menu);
+	}
 
 	/* Reset state vars for starting fresh when Reload is triggered */
 	current_item = NULL;
@@ -1327,20 +1252,6 @@ menu_set_selection(struct menu *menu, struct menuitem *item)
 	menu->selection.item = item;
 }
 
-static void
-close_all_submenus(struct menu *menu)
-{
-	struct menuitem *item;
-	wl_list_for_each(item, &menu->menuitems, link) {
-		if (item->submenu) {
-			wlr_scene_node_set_enabled(
-				&item->submenu->scene_tree->node, false);
-			close_all_submenus(item->submenu);
-		}
-	}
-	menu->selection.menu = NULL;
-}
-
 /*
  * We only destroy pipemenus when closing the entire menu-tree so that pipemenu
  * are cached (for as long as the menu is open). This drastically improves the
@@ -1348,15 +1259,22 @@ close_all_submenus(struct menu *menu)
  * item may be selected multiple times.
  */
 static void
-destroy_pipemenus(struct server *server)
+reset_pipemenus(struct server *server)
 {
 	wlr_log(WLR_DEBUG, "number of menus before close=%d",
 		wl_list_length(&server->menus));
 
 	struct menu *iter, *tmp;
 	wl_list_for_each_safe(iter, tmp, &server->menus, link) {
-		if (iter->is_pipemenu) {
+		if (iter->is_pipemenu_child) {
+			/* Destroy submenus of pipemenus */
 			menu_free(iter);
+		} else if (iter->execute) {
+			/*
+			 * Destroy items and scene-nodes of pipemenus so that
+			 * they are generated again when being opened
+			 */
+			reset_menu(iter);
 		}
 	}
 
@@ -1367,11 +1285,17 @@ destroy_pipemenus(struct server *server)
 static void
 _close(struct menu *menu)
 {
-	wlr_scene_node_set_enabled(&menu->scene_tree->node, false);
+	if (menu->scene_tree) {
+		wlr_scene_node_set_enabled(&menu->scene_tree->node, false);
+	}
 	menu_set_selection(menu, NULL);
 	if (menu->selection.menu) {
 		_close(menu->selection.menu);
 		menu->selection.menu = NULL;
+	}
+	if (menu->pipe_ctx) {
+		pipemenu_ctx_destroy(menu->pipe_ctx);
+		assert(!menu->pipe_ctx);
 	}
 }
 
@@ -1385,22 +1309,43 @@ menu_close(struct menu *menu)
 	_close(menu);
 }
 
+static void
+open_menu(struct menu *menu, struct wlr_box anchor_rect)
+{
+	if (!strcmp(menu->id, "client-list-combined-menu")) {
+		update_client_list_combined_menu(menu->server);
+	} else if (!strcmp(menu->id, "client-send-to-menu")) {
+		update_client_send_to_menu(menu->server);
+	}
+
+	if (!menu->scene_tree) {
+		menu_create_scene(menu);
+		assert(menu->scene_tree);
+	}
+	menu_reposition(menu, anchor_rect);
+	wlr_scene_node_set_enabled(&menu->scene_tree->node, true);
+}
+
+static void open_pipemenu_async(struct menu *pipemenu, struct wlr_box anchor_rect);
+
 void
 menu_open_root(struct menu *menu, int x, int y)
 {
+	assert(menu);
+
 	if (menu->server->input_mode != LAB_INPUT_STATE_PASSTHROUGH) {
 		return;
 	}
 
-	assert(menu);
-	if (menu->server->menu_current) {
-		menu_close(menu->server->menu_current);
-		destroy_pipemenus(menu->server);
+	assert(!menu->server->menu_current);
+
+	struct wlr_box anchor_rect = {.x = x, .y = y};
+	if (menu->execute) {
+		open_pipemenu_async(menu, anchor_rect);
+	} else {
+		open_menu(menu, anchor_rect);
 	}
-	close_all_submenus(menu);
-	menu_set_selection(menu, NULL);
-	menu_configure(menu, (struct wlr_box){.x = x, .y = y});
-	wlr_scene_node_set_enabled(&menu->scene_tree->node, true);
+
 	menu->server->menu_current = menu;
 	selected_item = NULL;
 	seat_focus_override_begin(&menu->server->seat,
@@ -1410,86 +1355,21 @@ menu_open_root(struct menu *menu, int x, int y)
 static void
 create_pipe_menu(struct menu_pipe_context *ctx)
 {
-	if (ctx->top_level_menu) {
-		/*
-		 * We execute the scripts for the toplevel pipemenus at startup
-		 * or Reconfigure, but they can be opened before they finish
-		 * execution, usually with their content empty. Make sure they
-		 * are closed and emptied.
-		 */
-		if (ctx->server->menu_current == ctx->top_level_menu) {
-			menu_close_root(ctx->server);
-		}
-		struct menuitem *item, *tmp;
-		wl_list_for_each_safe(item, tmp, &ctx->top_level_menu->menuitems, link) {
-			item_destroy(item);
-		}
-
-		menu_level++;
-		current_menu = ctx->top_level_menu;
-		if (!parse_buf(ctx->server, &ctx->buf)) {
-			wlr_log(WLR_ERROR, "Failed to parse piped top level menu %s",
-				ctx->top_level_menu->id);
-		}
-		menu_level--;
-		post_processing(ctx->server);
-		validate(ctx->server);
-		menu_update_scene(current_menu);
-		return;
-	}
-
-	assert(ctx->item);
-
-	struct menu *pipe_parent = ctx->item->parent;
-	if (!pipe_parent) {
-		wlr_log(WLR_INFO, "[pipemenu %ld] invalid parent",
-			(long)ctx->pid);
-		return;
-	}
-	if (!pipe_parent->scene_tree->node.enabled) {
-		wlr_log(WLR_INFO, "[pipemenu %ld] parent menu already closed",
-			(long)ctx->pid);
-		return;
-	}
-
-	/*
-	 * Pipemenus do not contain a toplevel <menu> element so we have to
-	 * create that first `struct menu`.
-	 */
-	struct menu *pipe_menu = menu_create(ctx->server, ctx->item->id, /*label*/ NULL);
-	pipe_menu->is_pipemenu = true;
-	pipe_menu->triggered_by_view = pipe_parent->triggered_by_view;
-	pipe_menu->parent = pipe_parent;
-
+	struct server *server = ctx->pipemenu->server;
+	struct menu *old_current_menu = current_menu;
 	menu_level++;
-	current_menu = pipe_menu;
-	if (!parse_buf(ctx->server, &ctx->buf)) {
-		menu_free(pipe_menu);
-		ctx->item->submenu = NULL;
+	current_menu = ctx->pipemenu;
+	if (!parse_buf(server, &ctx->buf)) {
 		goto restore_menus;
 	}
-	ctx->item->submenu = pipe_menu;
-
-	/*
-	 * TODO: refactor validate() and post_processing() to only
-	 * operate from current point onwards
-	 */
-
-	/* Set menu-widths before configuring */
-	post_processing(ctx->server);
-
-	struct wlr_box anchor_rect =
-		get_item_anchor_rect(ctx->server->theme, ctx->item);
-	menu_configure(pipe_menu, anchor_rect);
-
-	validate(ctx->server);
+	/* TODO: apply validate() only for generated pipemenus */
+	validate(server);
 
 	/* Finally open the new submenu tree */
-	wlr_scene_node_set_enabled(&pipe_menu->scene_tree->node, true);
-	pipe_parent->selection.menu = pipe_menu;
+	open_menu(ctx->pipemenu, ctx->anchor_rect);
 
 restore_menus:
-	current_menu = pipe_parent;
+	current_menu = old_current_menu;
 	menu_level--;
 }
 
@@ -1500,11 +1380,8 @@ pipemenu_ctx_destroy(struct menu_pipe_context *ctx)
 	wl_event_source_remove(ctx->event_timeout);
 	spawn_piped_close(ctx->pid, ctx->pipe_fd);
 	buf_reset(&ctx->buf);
-	if (ctx->item) {
-		ctx->item->pipe_ctx = NULL;
-	}
-	if (ctx->top_level_menu) {
-		ctx->top_level_menu->pipe_ctx = NULL;
+	if (ctx->pipemenu) {
+		ctx->pipemenu->pipe_ctx = NULL;
 	}
 	free(ctx);
 	waiting_for_pipe_menu = false;
@@ -1515,7 +1392,7 @@ handle_pipemenu_timeout(void *_ctx)
 {
 	struct menu_pipe_context *ctx = _ctx;
 	wlr_log(WLR_ERROR, "[pipemenu %ld] timeout reached, killing %s",
-		(long)ctx->pid, ctx->item ? ctx->item->execute : "n/a");
+		(long)ctx->pid, ctx->pipemenu->execute);
 	kill(ctx->pid, SIGTERM);
 	pipemenu_ctx_destroy(ctx);
 	return 0;
@@ -1529,14 +1406,6 @@ handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx)
 	char data[8193];
 	ssize_t size;
 
-	if (!ctx->item && !ctx->top_level_menu) {
-		/* parent menu item got destroyed in the meantime */
-		wlr_log(WLR_INFO, "[pipemenu %ld] parent menu item destroyed",
-			(long)ctx->pid);
-		kill(ctx->pid, SIGTERM);
-		goto clean_up;
-	}
-
 	do {
 		/* leave space for terminating NULL byte */
 		size = read(fd, data, sizeof(data) - 1);
@@ -1544,7 +1413,7 @@ handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx)
 
 	if (size == -1) {
 		wlr_log_errno(WLR_ERROR, "[pipemenu %ld] failed to read data (%s)",
-			(long)ctx->pid, ctx->item ? ctx->item->execute : "n/a");
+			(long)ctx->pid, ctx->pipemenu->execute);
 		goto clean_up;
 	}
 
@@ -1552,7 +1421,7 @@ handle_pipemenu_readable(int fd, uint32_t mask, void *_ctx)
 	if (ctx->buf.len + size > PIPEMENU_MAX_BUF_SIZE) {
 		wlr_log(WLR_ERROR, "[pipemenu %ld] too big (> %d bytes); killing %s",
 			(long)ctx->pid, PIPEMENU_MAX_BUF_SIZE,
-			ctx->item ? ctx->item->execute : "n/a");
+			ctx->pipemenu->execute);
 		kill(ctx->pid, SIGTERM);
 		goto clean_up;
 	}
@@ -1578,42 +1447,39 @@ clean_up:
 }
 
 static void
-parse_pipemenu(struct menuitem *item)
+open_pipemenu_async(struct menu *pipemenu, struct wlr_box anchor_rect)
 {
-	if (!is_unique_id(item->parent->server, item->id)) {
-		wlr_log(WLR_ERROR, "duplicate id '%s'; abort pipemenu", item->id);
-		return;
-	}
+	struct server *server = pipemenu->server;
 
-	if (item->pipe_ctx) {
-		wlr_log(WLR_ERROR, "item already has a pipe context attached");
-		return;
-	}
+	assert(!pipemenu->pipe_ctx);
+	assert(!pipemenu->scene_tree);
 
 	int pipe_fd = 0;
-	pid_t pid = spawn_piped(item->execute, &pipe_fd);
+	pid_t pid = spawn_piped(pipemenu->execute, &pipe_fd);
 	if (pid <= 0) {
-		wlr_log(WLR_ERROR, "Failed to spawn pipe menu process %s", item->execute);
+		wlr_log(WLR_ERROR, "Failed to spawn pipe menu process %s",
+			pipemenu->execute);
 		return;
 	}
 
 	waiting_for_pipe_menu = true;
 	struct menu_pipe_context *ctx = znew(*ctx);
-	ctx->server = item->parent->server;
-	ctx->item = item;
 	ctx->pid = pid;
 	ctx->pipe_fd = pipe_fd;
 	ctx->buf = BUF_INIT;
-	item->pipe_ctx = ctx;
+	ctx->anchor_rect = anchor_rect;
+	ctx->pipemenu = pipemenu;
+	pipemenu->pipe_ctx = ctx;
 
-	ctx->event_read = wl_event_loop_add_fd(ctx->server->wl_event_loop,
+	ctx->event_read = wl_event_loop_add_fd(server->wl_event_loop,
 		pipe_fd, WL_EVENT_READABLE, handle_pipemenu_readable, ctx);
 
-	ctx->event_timeout = wl_event_loop_add_timer(ctx->server->wl_event_loop,
+	ctx->event_timeout = wl_event_loop_add_timer(server->wl_event_loop,
 		handle_pipemenu_timeout, ctx);
 	wl_event_source_timer_update(ctx->event_timeout, PIPEMENU_TIMEOUT_IN_MS);
 
-	wlr_log(WLR_DEBUG, "[pipemenu %ld] executed: %s", (long)ctx->pid, ctx->item->execute);
+	wlr_log(WLR_DEBUG, "[pipemenu %ld] executed: %s",
+		(long)ctx->pid, ctx->pipemenu->execute);
 }
 
 static void
@@ -1642,21 +1508,19 @@ menu_process_item_selection(struct menuitem *item)
 		menu_close(item->parent->selection.menu);
 	}
 
-	/* Pipemenu */
-	if (item->execute && !item->submenu) {
-		/* pipemenus are generated async */
-		parse_pipemenu(item);
-		return;
-	}
-
 	if (item->submenu) {
 		/* Sync the triggering view */
 		item->submenu->triggered_by_view = item->parent->triggered_by_view;
 		/* Ensure the submenu has its parent set correctly */
 		item->submenu->parent = item->parent;
 		/* And open the new submenu tree */
-		wlr_scene_node_set_enabled(
-			&item->submenu->scene_tree->node, true);
+		struct wlr_box anchor_rect =
+			get_item_anchor_rect(item->submenu->server->theme, item);
+		if (item->submenu->execute && !item->submenu->scene_tree) {
+			open_pipemenu_async(item->submenu, anchor_rect);
+		} else {
+			open_menu(item->submenu, anchor_rect);
+		}
 	}
 
 	item->parent->selection.menu = item->submenu;
@@ -1720,13 +1584,9 @@ menu_execute_item(struct menuitem *item)
 		return false;
 	}
 
-	/*
-	 * We close the menu here to provide a faster feedback to the user.
-	 * We do that without resetting the input state so src/cursor.c
-	 * can do its own clean up on the following RELEASE event.
-	 */
 	struct server *server = item->parent->server;
 	menu_close(server->menu_current);
+	server->menu_current = NULL;
 	seat_focus_override_end(&server->seat);
 
 	/*
@@ -1738,7 +1598,7 @@ menu_execute_item(struct menuitem *item)
 	 * menu_close() and destroy_pipemenus() which we have to handle
 	 * before/after action_run() respectively.
 	 */
-	if (item->id && !strcmp(item->id, "client-list-combined-menu")
+	if (!strcmp(item->parent->id, "client-list-combined-menu")
 			&& item->client_list_view) {
 		actions_run(item->client_list_view, server, &item->actions, NULL);
 	} else {
@@ -1746,8 +1606,7 @@ menu_execute_item(struct menuitem *item)
 				&item->actions, NULL);
 	}
 
-	server->menu_current = NULL;
-	destroy_pipemenus(server);
+	reset_pipemenus(server);
 	return true;
 }
 
@@ -1832,11 +1691,11 @@ void
 menu_close_root(struct server *server)
 {
 	assert(server->input_mode == LAB_INPUT_STATE_MENU);
-	if (server->menu_current) {
-		menu_close(server->menu_current);
-		server->menu_current = NULL;
-		destroy_pipemenus(server);
-	}
+	assert(server->menu_current);
+
+	menu_close(server->menu_current);
+	server->menu_current = NULL;
+	reset_pipemenus(server);
 	seat_focus_override_end(&server->seat);
 }
 

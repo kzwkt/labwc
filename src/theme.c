@@ -542,6 +542,7 @@ theme_builtin(struct theme *theme, struct server *server)
 	theme->osd_window_switcher_item_padding_x = 10;
 	theme->osd_window_switcher_item_padding_y = 1;
 	theme->osd_window_switcher_item_active_border_width = 2;
+	theme->osd_window_switcher_item_icon_size = -1;
 
 	/* inherit settings in post_processing() if not set elsewhere */
 	theme->osd_window_switcher_preview_border_width = INT_MIN;
@@ -550,6 +551,7 @@ theme_builtin(struct theme *theme, struct server *server)
 
 	theme->osd_workspace_switcher_boxes_width = 20;
 	theme->osd_workspace_switcher_boxes_height = 20;
+	theme->osd_workspace_switcher_boxes_border_width = 2;
 
 	/* inherit settings in post_processing() if not set elsewhere */
 	theme->osd_bg_color[0] = FLT_MIN;
@@ -879,6 +881,11 @@ entry(struct theme *theme, const char *key, const char *value)
 			get_int_if_positive(
 				value, "osd.window-switcher.item.active.border.width");
 	}
+	if (match_glob(key, "osd.window-switcher.item.icon.size")) {
+		theme->osd_window_switcher_item_icon_size =
+			get_int_if_positive(
+				value, "osd.window-switcher.item.icon.size");
+	}
 	if (match_glob(key, "osd.window-switcher.preview.border.width")) {
 		theme->osd_window_switcher_preview_border_width =
 			get_int_if_positive(
@@ -896,6 +903,11 @@ entry(struct theme *theme, const char *key, const char *value)
 		theme->osd_workspace_switcher_boxes_height =
 			get_int_if_positive(
 				value, "osd.workspace-switcher.boxes.height");
+	}
+	if (match_glob(key, "osd.workspace-switcher.boxes.border.width")) {
+		theme->osd_workspace_switcher_boxes_border_width =
+			get_int_if_positive(
+				value, "osd.workspace-switcher.boxes.border.width");
 	}
 	if (match_glob(key, "osd.label.text.color")) {
 		parse_hexstr(value, theme->osd_label_text_color);
@@ -1380,12 +1392,22 @@ post_processing(struct theme *theme)
 	theme->menu_header_height = font_height(&rc.font_menuheader)
 		+ 2 * theme->menu_items_padding_y;
 
-	theme->osd_window_switcher_item_height = font_height(&rc.font_osd)
+	int osd_font_height = font_height(&rc.font_osd);
+	if (theme->osd_window_switcher_item_icon_size <= 0) {
+		theme->osd_window_switcher_item_icon_size = osd_font_height;
+	}
+	int osd_field_height =
+		MAX(osd_font_height, theme->osd_window_switcher_item_icon_size);
+	theme->osd_window_switcher_item_height = osd_field_height
 		+ 2 * theme->osd_window_switcher_item_padding_y
 		+ 2 * theme->osd_window_switcher_item_active_border_width;
 
 	if (rc.corner_radius >= theme->titlebar_height) {
 		rc.corner_radius = theme->titlebar_height - 1;
+	}
+
+	if (rc.resize_corner_range < 0) {
+		rc.resize_corner_range = theme->titlebar_height / 2;
 	}
 
 	int min_button_hover_radius =

@@ -120,11 +120,13 @@ High-level summary of items that Labwc supports:
 
 | video link                | date        | duration
 | ------------------------- | ------------| -------
+| [0.8.3-release-video]     | 03-Mar-2025 | 2:35
 | [0.7.2-release-video]     | 24-May-2024 | 3:17
 | [0.6.0-release-video]     | 31-Oct-2022 | 2:48
 | [0.3.0-release-video]     | 05-Aug-2021 | 1:10
 | [pre-0.1.0-release-video] | 25-Feb-2021 | 3:42
 
+[0.8.3-release-video]: https://youtu.be/HGzqci_THwA
 [0.7.2-release-video]: https://youtu.be/gNIj6VU-IH8
 [0.6.0-release-video]: https://youtu.be/guBnx18EQiA
 [0.3.0-release-video]: https://youtu.be/AU_M3n_FS-E
@@ -257,7 +259,7 @@ Suggested apps to use with labwc:
 - Screen shooter: [grim]
 - Screen recorder: [wf-recorder]
 - Background image: [swaybg]
-- Panel: [waybar], [yambar], [lavalauncher], [sfwbar]
+- Panel: [waybar], [yambar], [lavalauncher], [sfwbar], [xfce4-panel]
 - Launchers: [bemenu], [fuzzel], [wofi]
 - Output managers: [wlopm], [kanshi], [wlr-randr]
 - Screen locker: [swaylock]
@@ -294,6 +296,7 @@ See [integration] for further details.
 [yambar]: https://codeberg.org/dnkl/yambar
 [lavalauncher]: https://sr.ht/~leon_plickat/LavaLauncher
 [sfwbar]: https://github.com/LBCrion/sfwbar
+[xfce4-panel]: https://gitlab.xfce.org/xfce/xfce4-panel
 [bemenu]: https://github.com/Cloudef/bemenu
 [fuzzel]: https://codeberg.org/dnkl/fuzzel
 [wofi]: https://hg.sr.ht/~scoopta/wofi

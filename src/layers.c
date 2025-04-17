@@ -136,6 +136,9 @@ try_to_focus_next_layer_or_toplevel(struct server *server)
 {
 	struct seat *seat = &server->seat;
 	struct output *output = output_nearest_to_cursor(server);
+	if (!output) {
+		goto no_output;
+	}
 
 	enum zwlr_layer_shell_v1_layer overlay = ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY;
 	enum zwlr_layer_shell_v1_layer top = ZWLR_LAYER_SHELL_V1_LAYER_TOP;
@@ -169,6 +172,7 @@ try_to_focus_next_layer_or_toplevel(struct server *server)
 	 * Unfocus the current layer-surface and focus the topmost toplevel if
 	 * one exists on the current workspace.
 	 */
+no_output:
 	if (seat->focused_layer) {
 		seat_set_focus_layer(seat, NULL);
 	}
@@ -595,4 +599,10 @@ layers_init(struct server *server)
 	server->new_layer_surface.notify = handle_new_layer_surface;
 	wl_signal_add(&server->layer_shell->events.new_surface,
 		&server->new_layer_surface);
+}
+
+void
+layers_finish(struct server *server)
+{
+	wl_list_remove(&server->new_layer_surface.link);
 }

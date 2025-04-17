@@ -486,6 +486,7 @@ new_output_notify(struct wl_listener *listener, void *data)
 	wl_signal_add(&wlr_output->events.request_state, &output->request_state);
 
 	wl_list_init(&output->regions);
+	wl_array_init(&output->osd_scene.items);
 
 	/*
 	 * Create layer-trees (background, bottom, top and overlay) and
@@ -512,20 +513,22 @@ new_output_notify(struct wl_listener *listener, void *data)
 	 * bottom):
 	 *	- session lock layer
 	 *	- window switcher osd
-	 *	- compositor menu
+	 *	- (compositor menu)
 	 *	- layer-shell popups
 	 *	- overlay layer
 	 *	- top layer
-	 *	- views
+	 *	- (views)
 	 *	- bottom layer
 	 *	- background layer
 	 */
 	wlr_scene_node_lower_to_bottom(&output->layer_tree[1]->node);
 	wlr_scene_node_lower_to_bottom(&output->layer_tree[0]->node);
-	wlr_scene_node_raise_to_top(&output->layer_tree[2]->node);
-	wlr_scene_node_raise_to_top(&output->layer_tree[3]->node);
-	wlr_scene_node_raise_to_top(&output->layer_popup_tree->node);
-	wlr_scene_node_raise_to_top(&server->menu_tree->node);
+
+	struct wlr_scene_node *menu_node = &server->menu_tree->node;
+	wlr_scene_node_place_below(&output->layer_tree[2]->node, menu_node);
+	wlr_scene_node_place_below(&output->layer_tree[3]->node, menu_node);
+	wlr_scene_node_place_below(&output->layer_popup_tree->node, menu_node);
+
 	wlr_scene_node_raise_to_top(&output->osd_tree->node);
 	wlr_scene_node_raise_to_top(&output->session_lock_tree->node);
 
@@ -568,6 +571,15 @@ output_init(struct server *server)
 	wl_list_init(&server->outputs);
 
 	output_manager_init(server);
+}
+
+static void output_manager_finish(struct server *server);
+
+void
+output_finish(struct server *server)
+{
+	wl_list_remove(&server->new_output.link);
+	output_manager_finish(server);
 }
 
 static void
@@ -888,6 +900,15 @@ output_manager_init(struct server *server)
 		&server->gamma_control_set_gamma);
 }
 
+static void
+output_manager_finish(struct server *server)
+{
+	wl_list_remove(&server->output_layout_change.link);
+	wl_list_remove(&server->output_manager_apply.link);
+	wl_list_remove(&server->output_manager_test.link);
+	wl_list_remove(&server->gamma_control_set_gamma.link);
+}
+
 struct output *
 output_from_wlr_output(struct server *server, struct wlr_output *wlr_output)
 {
@@ -1068,11 +1089,39 @@ handle_output_power_manager_set_mode(struct wl_listener *listener, void *data)
 
 	switch (event->mode) {
 	case ZWLR_OUTPUT_POWER_V1_MODE_OFF:
+		if (!event->output->enabled) {
+			return;
+		}
 		wlr_output_state_set_enabled(&output->pending, false);
 		output_state_commit(output);
 		break;
 	case ZWLR_OUTPUT_POWER_V1_MODE_ON:
+		if (event->output->enabled) {
+			return;
+		}
 		wlr_output_state_set_enabled(&output->pending, true);
+		if (!event->output->current_mode) {
+			/*
+			 * This output uses a custom mode, due to a wlroots DRM
+			 * issue we have to ensure the output commit includes a
+			 * modeset. This is made more difficult by wlroots
+			 * removing a requested change for a custom resolution
+			 * from the output state when it matches the wlr_output
+			 * one. To in turn work around this issue we temporarily
+			 * change the custom wlr_output resolution.
+			 *
+			 * See: https://gitlab.freedesktop.org/wlroots/wlroots/-/issues/3946
+			 *
+			 * TODO: To be removed once the underlying wlroots issue
+			 *       has been fixed and released. Likely only after
+			 *       labwc starts tracking wlroots 0.19 to keep older
+			 *       0.18.x releases working as expected.
+			 */
+			int width = event->output->width;
+			event->output->width++;
+			wlr_output_state_set_custom_mode(&output->pending, width,
+				event->output->height, event->output->refresh);
+		}
 		output_state_commit(output);
 		/*
 		 * Re-set the cursor image so that the cursor

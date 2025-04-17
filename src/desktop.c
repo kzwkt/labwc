@@ -51,6 +51,11 @@ desktop_focus_view(struct view *view, bool raise)
 		return;
 	}
 
+	if (view->server->input_mode == LAB_INPUT_STATE_WINDOW_SWITCHER) {
+		wlr_log(WLR_DEBUG, "not focusing window while window switching");
+		return;
+	}
+
 	if (view->minimized) {
 		/*
 		 * Unminimizing will map the view which triggers a call to this
@@ -278,7 +283,8 @@ get_cursor_context(struct server *server)
 			case LAB_NODE_DESC_VIEW:
 			case LAB_NODE_DESC_XDG_POPUP:
 				ret.view = desc->data;
-				ret.type = ssd_get_part_type(ret.view->ssd, ret.node);
+				ret.type = ssd_get_part_type(
+					ret.view->ssd, ret.node, cursor);
 				if (ret.type == LAB_SSD_CLIENT) {
 					ret.surface = lab_wlr_surface_from_node(ret.node);
 				}

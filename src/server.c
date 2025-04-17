@@ -413,7 +413,7 @@ handle_renderer_lost(struct wl_listener *listener, void *data)
 
 	reload_config_and_theme(server);
 
-	magnify_reset();
+	magnifier_reset();
 
 	wlr_allocator_destroy(old_allocator);
 	wlr_renderer_destroy(old_renderer);
@@ -580,11 +580,6 @@ server_init(struct server *server)
 #if HAVE_XWAYLAND
 	server->unmanaged_tree = wlr_scene_tree_create(&server->scene->tree);
 #endif
-
-	/*
-	 * menu_tree is moved to top in new_output_notify() when layer-shell
-	 * layers are positioned
-	 */
 	server->menu_tree = wlr_scene_tree_create(&server->scene->tree);
 
 	workspaces_init(server);
@@ -757,12 +752,30 @@ server_finish(struct server *server)
 		wl_event_source_remove(sighup_source);
 	}
 	wl_display_destroy_clients(server->wl_display);
-	wlr_allocator_destroy(server->allocator);
-	wlr_renderer_destroy(server->renderer);
-	wlr_backend_destroy(server->backend);
+
 	seat_finish(server);
+	output_finish(server);
+	xdg_shell_finish(server);
+	layers_finish(server);
+	kde_server_decoration_finish(server);
+	xdg_server_decoration_finish(server);
+	wl_list_remove(&server->new_constraint.link);
+	wl_list_remove(&server->output_power_manager_set_mode.link);
+	wl_list_remove(&server->tearing_new_object.link);
+	if (server->drm_lease_request.notify) {
+		wl_list_remove(&server->drm_lease_request.link);
+		server->drm_lease_request.notify = NULL;
+	}
+
+	wlr_backend_destroy(server->backend);
+	wlr_allocator_destroy(server->allocator);
+
+	wl_list_remove(&server->renderer_lost.link);
+	wlr_renderer_destroy(server->renderer);
+
 	workspaces_destroy(server);
 	wlr_scene_node_destroy(&server->scene->tree.node);
+
 	wl_display_destroy(server->wl_display);
 	free(server->ssd_hover_state);
 }

@@ -292,11 +292,6 @@ struct server {
 	 * Note that active_view is synced with foreign-toplevel clients.
 	 */
 	struct view *active_view;
-	/*
-	 * Most recently raised view. Used to avoid unnecessarily
-	 * raising the same view over and over.
-	 */
-	struct view *last_raised_view;
 
 	struct ssd_hover_state *ssd_hover_state;
 
@@ -412,6 +407,12 @@ struct output {
 	struct wlr_scene_tree *osd_tree;
 	struct wlr_scene_tree *session_lock_tree;
 	struct wlr_scene_buffer *workspace_osd;
+
+	struct osd_scene {
+		struct wl_array items; /* struct osd_scene_item */
+		struct wlr_scene_tree *tree;
+	} osd_scene;
+
 	/* In output-relative scene coordinates */
 	struct wlr_box usable_area;
 
@@ -435,6 +436,7 @@ struct constraint {
 
 void xdg_popup_create(struct view *view, struct wlr_xdg_popup *wlr_popup);
 void xdg_shell_init(struct server *server);
+void xdg_shell_finish(struct server *server);
 
 /*
  * desktop.c routines deal with a collection of views
@@ -539,6 +541,7 @@ void interactive_cancel(struct view *view);
 enum view_edge edge_from_cursor(struct seat *seat, struct output **dest_output);
 
 void output_init(struct server *server);
+void output_finish(struct server *server);
 void output_manager_init(struct server *server);
 struct output *output_from_wlr_output(struct server *server,
 	struct wlr_output *wlr_output);

@@ -110,8 +110,8 @@ labwc-config(5).
 	Default is 0.
 
 	Note: for a circular hover effect, set *window.button.width* and
-	*window.button.height* equal and *window.button.hover.bg.corner-radius* half
-	of them.
+	*window.button.height* equal and *window.button.hover.bg.corner-radius*
+	half of them.
 
 *window.active.button.unpressed.image.color*
 	Color of the images in titlebar buttons in their default, unpressed,
@@ -256,6 +256,11 @@ all are supported.
 	Border width of the selection box in the window switcher in pixels.
 	Default is 2.
 
+*osd.window-switcher.item.icon.size*
+	Size of the icon in window switcher, in pixels.
+	If not set, the font size derived from <theme><font place="OnScreenDisplay">
+	is used.
+
 *osd.window-switcher.preview.border.width*
 	Border width of the outlines shown as the preview of the window selected
 	by window switcher. Inherits *osd.border.width* if not set.
@@ -275,6 +280,9 @@ all are supported.
 *osd.workspace-switcher.boxes.height*
 	Height of boxes in workspace switcher in pixels. Setting to 0 disables
 	boxes. Default is 20.
+
+*osd.workspace-switcher.boxes.border.width*
+	Border width of boxes in workspace switcher in pixels. Default is 2.
 
 *snapping.overlay.region.bg.enabled* [yes|no]
 	Show a filled rectangle as an overlay when a window is snapped to a
